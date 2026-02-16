@@ -66,6 +66,8 @@ htmlcov/
 *.feather
 data/*
 !data/cafe_sales.csv
+!data/factory_iot_telemetry.csv
+!data/saas_customer_health.csv
 datasets/
 
 # Model files
