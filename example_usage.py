@@ -65,6 +65,7 @@ analysis_steps = [
     ("profile_dataset", "Dataset Profile"),
     ("analyze_missingness", "Missingness Analysis"),
     ("compute_aggregates", "Aggregates Analysis"),
+    ("analyze_distributions", "Distribution Analysis"),
     ("analyze_relationships", "Relationships Analysis"),
 ]
 
