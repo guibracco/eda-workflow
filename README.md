@@ -27,6 +27,8 @@ The workflow currently runs four deterministic analysis tools:
 4. **`analyze_relationships`**
    Adds interaction and quality checks with:
    - numeric correlation matrix and strongest correlation pairs
+   - actionable correlation filtering to deprioritize obvious derived relationships (for example quantity vs total)
+   - excluded-correlation reasons for traceability of what was filtered out
    - duplicate-row rate
    - high-cardinality categorical column detection (identifier-like fields)
    - suspicious categorical token detection (e.g., `unknown`, `error`, `missing`)
@@ -41,6 +43,7 @@ These two added tools (`compute_aggregates`, `analyze_relationships`) were chose
 - **Are there obvious integrity issues?** (duplicates, suspicious tokens, formula mismatches)
 
 This keeps the workflow production-friendly: deterministic, fast, and interpretable before deeper modeling or hypothesis testing.
+Observation extraction is also constrained to avoid generic tautologies and prioritize decision-relevant findings.
 
 ## Setup
 
