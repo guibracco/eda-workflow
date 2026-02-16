@@ -13,7 +13,7 @@ This approach combines deterministic pandas-based analysis with LLM-powered inte
 
 ## Analysis Tools
 
-The workflow currently runs four deterministic analysis tools:
+The workflow currently runs five deterministic analysis tools:
 
 1. **`profile_dataset`**
    Builds a structural profile (shape, dtypes, numeric summaries, top category frequencies) so downstream steps have a reliable schema baseline.
@@ -24,7 +24,12 @@ The workflow currently runs four deterministic analysis tools:
    - overall numeric rollups (sum/mean/median/std/min/max)
    - grouped aggregates on low-cardinality categorical columns
    - temporal aggregates (monthly and day-of-week) when a date-like column is detected
-4. **`analyze_relationships`**
+4. **`analyze_distributions`**
+   Adds univariate diagnostics to surface shape and quality risks with:
+   - per-column quantiles, skewness, and IQR-based outlier rates
+   - zero-inflation and near-constant numeric feature flags
+   - rare-category detection for low-frequency categorical values
+5. **`analyze_relationships`**
    Adds interaction and quality checks with:
    - numeric correlation matrix and strongest correlation pairs
    - actionable correlation filtering to deprioritize obvious derived relationships (for example quantity vs total)
@@ -36,9 +41,10 @@ The workflow currently runs four deterministic analysis tools:
 
 ### Why These Additions
 
-These two added tools (`compute_aggregates`, `analyze_relationships`) were chosen because they cover the highest-value questions in a first-pass EDA with minimal complexity:
+These three added tools (`compute_aggregates`, `analyze_distributions`, `analyze_relationships`) were chosen because they cover the highest-value questions in a first-pass EDA with minimal complexity:
 
 - **Where is volume/value concentrated?** (grouped + temporal aggregates)
+- **Which columns have outliers or heavy skew?** (distribution diagnostics)
 - **Which variables move together?** (correlations)
 - **Are there obvious integrity issues?** (duplicates, suspicious tokens, formula mismatches)
 
