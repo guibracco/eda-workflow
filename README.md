@@ -154,10 +154,12 @@ If OpenAI or Mermaid network calls are unavailable, the script falls back to det
 ```
 eda-agent/
 ├── data/
-│   └── cafe_sales.csv             # Sample dataset
+│   ├── cafe_sales.csv             # Sample dataset
+│   ├── factory_iot_telemetry.csv  # Sample dataset
+│   └── saas_customer_health.csv   # Sample dataset
 ├── eda_workflow/
 │   ├── __init__.py
-│   ├── eda_workflow.py             # Main workflow class and graph
+│   ├── eda_workflow.py            # Main workflow class and graph
 │   └── prompts/                   # LLM prompt templates
 │       ├── extract_observations_system.txt
 │       ├── extract_observations_human.txt
