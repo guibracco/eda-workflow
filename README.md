@@ -11,6 +11,37 @@ The workflow follows a sequential process:
 
 This approach combines deterministic pandas-based analysis with LLM-powered interpretation.
 
+## Analysis Tools
+
+The workflow currently runs four deterministic analysis tools:
+
+1. **`profile_dataset`**
+   Builds a structural profile (shape, dtypes, numeric summaries, top category frequencies) so downstream steps have a reliable schema baseline.
+2. **`analyze_missingness`**
+   Quantifies null counts/percentages and complete-row coverage to quickly surface data completeness risks.
+3. **`compute_aggregates`**
+   Adds first-pass business context with:
+   - overall numeric rollups (sum/mean/median/std/min/max)
+   - grouped aggregates on low-cardinality categorical columns
+   - temporal aggregates (monthly and day-of-week) when a date-like column is detected
+4. **`analyze_relationships`**
+   Adds interaction and quality checks with:
+   - numeric correlation matrix and strongest correlation pairs
+   - duplicate-row rate
+   - high-cardinality categorical column detection (identifier-like fields)
+   - suspicious categorical token detection (e.g., `unknown`, `error`, `missing`)
+   - arithmetic consistency checks for quantity x unit price vs total when compatible columns exist
+
+### Why These Additions
+
+These two added tools (`compute_aggregates`, `analyze_relationships`) were chosen because they cover the highest-value questions in a first-pass EDA with minimal complexity:
+
+- **Where is volume/value concentrated?** (grouped + temporal aggregates)
+- **Which variables move together?** (correlations)
+- **Are there obvious integrity issues?** (duplicates, suspicious tokens, formula mismatches)
+
+This keeps the workflow production-friendly: deterministic, fast, and interpretable before deeper modeling or hypothesis testing.
+
 ## Setup
 
 ### Prerequisites
@@ -107,6 +138,7 @@ poetry run python example_usage.py
 ```
 
 This runs a full analysis on the sample dataset and prints the results for each step.
+If OpenAI or Mermaid network calls are unavailable, the script falls back to deterministic analysis without LLM synthesis.
 
 ## Project Structure
 
