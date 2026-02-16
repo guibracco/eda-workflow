@@ -377,20 +377,31 @@ def make_eda_baseline_workflow(
         df = pd.DataFrame.from_dict(state.get("dataframe"))
         results = state.get("results", {})
         
+        # Separate numeric vs categorical-like fields so this node can:
+        # 1) run univariate shape diagnostics on numeric columns
+        # 2) run rare-level checks on categorical columns.
         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
         categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
         
         numeric_distributions = {}
+        # Compute compact but high-signal univariate metrics per numeric column.
+        # The goal is first-pass screening for skew, tail risk, sparsity, and data oddities
+        # without adding heavy statistical machinery.
         for col in numeric_cols:
             series = df[col].dropna()
             if series.empty:
                 continue
             
+            # Quantiles provide robust shape context and are easier to interpret
+            # than relying on mean/std alone for non-normal distributions.
             quantiles = series.quantile([0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99])
             q1 = float(quantiles.loc[0.25])
             q3 = float(quantiles.loc[0.75])
             iqr = q3 - q1
             
+            # IQR outlier rule is deterministic and resilient to skew compared with
+            # z-score thresholds. If IQR is zero, treat outlier count as zero instead
+            # of producing unstable bounds.
             if iqr > 0:
                 lower_bound = q1 - 1.5 * iqr
                 upper_bound = q3 + 1.5 * iqr
@@ -400,6 +411,9 @@ def make_eda_baseline_workflow(
                 upper_bound = q3
                 outlier_mask = pd.Series(False, index=series.index)
             
+            # Zero/negative rates are practical quality and modeling signals:
+            # zero-heavy columns can indicate inflation/sparsity, and negatives can
+            # indicate business-rule violations for naturally non-negative metrics.
             zero_count = int((series == 0).sum())
             negative_count = int((series < 0).sum())
             outlier_count = int(outlier_mask.sum())
@@ -434,6 +448,8 @@ def make_eda_baseline_workflow(
                 "distinct_values": int(series.nunique()),
             }
         
+        # Build a curated flag summary so observation extraction can focus on
+        # the most important columns instead of scanning every metric detail.
         distribution_flags = {
             "highest_outlier_rate": [],
             "most_skewed": [],
@@ -441,6 +457,7 @@ def make_eda_baseline_workflow(
             "near_constant": [],
         }
         if numeric_distributions:
+            # Top outlier-rate columns often identify winsorization/capping candidates.
             outlier_ranked = sorted(
                 [
                     {
@@ -454,6 +471,7 @@ def make_eda_baseline_workflow(
             )
             distribution_flags["highest_outlier_rate"] = outlier_ranked[:3]
             
+            # Rank by absolute skewness because both left and right skew are relevant.
             skew_ranked = sorted(
                 [
                     {
@@ -468,6 +486,9 @@ def make_eda_baseline_workflow(
             )
             distribution_flags["most_skewed"] = skew_ranked[:3]
             
+            # Heuristic thresholds are intentionally simple for first-pass triage.
+            # 30%+ zeros signals likely zero inflation; <=2 distinct numeric values
+            # suggests binary/near-constant features.
             distribution_flags["zero_inflated"] = [
                 {
                     "column": col,
@@ -487,6 +508,9 @@ def make_eda_baseline_workflow(
             ][:5]
         
         rare_categories = {}
+        # Rare-level scan is capped (first 5 categorical columns, top 10 rare values)
+        # to keep output compact and token-efficient while still surfacing category
+        # sparsity that can hurt grouping/model stability.
         for col in categorical_cols[:5]:
             non_null = df[col].dropna()
             if non_null.empty:
