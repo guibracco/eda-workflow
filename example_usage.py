@@ -21,22 +21,38 @@ load_dotenv()
 # Path to sample dataset
 data_path = os.path.join("data", "cafe_sales.csv")
 
-# Initialize OpenAI model
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    temperature=0
-)
+# Initialize OpenAI model when available
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if openai_api_key:
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0
+    )
+else:
+    llm = None
+    print("OPENAI_API_KEY not found. Running workflow without LLM.\n")
 
 # Create EDA workflow with the model
 workflow = EDAWorkflow(model=llm)
 
-# Save a visual diagram of the graph
-workflow._compiled_graph.get_graph().draw_mermaid_png(output_file_path="graph.png")
-print("Graph diagram saved to graph.png\n")
+# Save a visual diagram of the graph (best effort, requires network access by default)
+try:
+    workflow._compiled_graph.get_graph().draw_mermaid_png(output_file_path="graph.png")
+    print("Graph diagram saved to graph.png\n")
+except Exception as exc:
+    print(f"Skipping graph diagram export: {exc}\n")
 
 # Run analysis on the dataset
 print("Running EDA analysis...\n")
-workflow.invoke_workflow(data_path)
+try:
+    workflow.invoke_workflow(data_path)
+except Exception as exc:
+    if llm is not None:
+        print(f"LLM-backed run failed, retrying without LLM: {exc}\n")
+        workflow = EDAWorkflow(model=None)
+        workflow.invoke_workflow(data_path)
+    else:
+        raise
 
 # Retrieve results
 summary = workflow.get_summary()
