@@ -221,25 +221,313 @@ def make_eda_baseline_workflow(
     
     def compute_aggregates_node(state: EDAState):
         """Compute group-by aggregates on key columns.
-        
-        TODO: Implement this analysis tool.
-        
-        See profile_dataset_node and analyze_missingness_node for reference.
-        Store your results in results["compute_aggregates"] and return
-        {"current_step": "compute_aggregates", "results": results}.
         """
         logger.info("Computing aggregates")
+        df = pd.DataFrame.from_dict(state.get("dataframe"))
+        results = state.get("results", {})
+        
+        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+        
+        overall_numeric = {}
+        for col in numeric_cols:
+            series = df[col].dropna()
+            if series.empty:
+                continue
+            overall_numeric[col] = {
+                "sum": round(float(series.sum()), 4),
+                "mean": round(float(series.mean()), 4),
+                "median": round(float(series.median()), 4),
+                "std": round(float(series.std()), 4) if len(series) > 1 else 0.0,
+                "min": round(float(series.min()), 4),
+                "max": round(float(series.max()), 4),
+            }
+        
+        grouped_aggregates = {}
+        max_unique_for_groupby = min(25, max(2, int(len(df) * 0.1))) if len(df) > 0 else 2
+        candidate_group_cols = []
+        for col in categorical_cols:
+            unique_count = df[col].nunique(dropna=True)
+            if 2 <= unique_count <= max_unique_for_groupby:
+                candidate_group_cols.append(col)
+        
+        for col in candidate_group_cols[:3]:
+            grouped = df.groupby(col, dropna=False).size().to_frame("row_count")
+            for metric_col in numeric_cols[:3]:
+                grouped[f"{metric_col}__sum"] = (
+                    df.groupby(col, dropna=False)[metric_col].sum()
+                )
+                grouped[f"{metric_col}__mean"] = (
+                    df.groupby(col, dropna=False)[metric_col].mean()
+                )
+            grouped = grouped.sort_values("row_count", ascending=False).head(10)
+            grouped = grouped.reset_index()
+            grouped = grouped.where(pd.notnull(grouped), None)
+            grouped_aggregates[col] = grouped.round(4).to_dict(orient="records")
+        
+        temporal_aggregates = {}
+        parsed_dates = {}
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                parsed = pd.to_datetime(df[col], errors="coerce")
+            elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
+                lowered = col.lower()
+                likely_date_name = any(
+                    token in lowered for token in ["date", "time", "timestamp", "day", "month", "year"]
+                )
+                if not likely_date_name:
+                    continue
+                parsed = pd.to_datetime(df[col], errors="coerce")
+            else:
+                continue
+            if parsed.notna().mean() >= 0.8:
+                parsed_dates[col] = parsed
+        
+        if parsed_dates:
+            date_col = max(parsed_dates, key=lambda c: parsed_dates[c].notna().mean())
+            date_series = parsed_dates[date_col]
+            date_df = df.copy()
+            date_df["_date"] = date_series
+            date_df = date_df.dropna(subset=["_date"])
+            
+            preferred_metric = None
+            preferred_keywords = ["total", "amount", "revenue", "sales", "spent"]
+            for keyword in preferred_keywords:
+                for col in numeric_cols:
+                    if keyword in col.lower():
+                        preferred_metric = col
+                        break
+                if preferred_metric:
+                    break
+            if preferred_metric is None and numeric_cols:
+                preferred_metric = numeric_cols[0]
+            
+            monthly_period = date_df["_date"].dt.to_period("M").astype(str)
+            monthly = date_df.groupby(monthly_period).size().to_frame("row_count")
+            day_of_week = date_df.groupby(date_df["_date"].dt.day_name()).size().to_frame("row_count")
+            
+            if preferred_metric:
+                monthly[f"{preferred_metric}__sum"] = (
+                    date_df.groupby(monthly_period)[preferred_metric].sum()
+                )
+                monthly[f"{preferred_metric}__mean"] = (
+                    date_df.groupby(monthly_period)[preferred_metric].mean()
+                )
+                day_of_week[f"{preferred_metric}__sum"] = (
+                    date_df.groupby(date_df["_date"].dt.day_name())[preferred_metric].sum()
+                )
+            
+            day_order = [
+                "Monday", "Tuesday", "Wednesday", "Thursday",
+                "Friday", "Saturday", "Sunday",
+            ]
+            day_of_week = day_of_week.reindex(day_order).fillna(0)
+            
+            temporal_aggregates = {
+                "date_column": date_col,
+                "metric_column": preferred_metric,
+                "date_coverage": {
+                    "min_date": str(date_df["_date"].min().date()),
+                    "max_date": str(date_df["_date"].max().date()),
+                    "rows_with_valid_dates": int(len(date_df)),
+                },
+                "monthly": monthly.sort_index().reset_index(
+                    names="period"
+                ).round(4).to_dict(orient="records"),
+                "day_of_week": day_of_week.reset_index(
+                    names="day"
+                ).round(4).to_dict(orient="records"),
+            }
+        
+        results["compute_aggregates"] = {
+            "numeric_overview": overall_numeric,
+            "grouped_aggregates": grouped_aggregates,
+            "temporal_aggregates": temporal_aggregates,
+        }
+        
+        return {
+            "current_step": "compute_aggregates",
+            "results": results,
+        }
     
     def analyze_relationships_node(state: EDAState):
         """Analyze relationships between variables.
-        
-        TODO: Implement this analysis tool.
-        
-        See profile_dataset_node and analyze_missingness_node for reference.
-        Store your results in results["analyze_relationships"] and return
-        {"current_step": "analyze_relationships", "results": results}.
         """
         logger.info("Analyzing relationships")
+        df = pd.DataFrame.from_dict(state.get("dataframe"))
+        results = state.get("results", {})
+        
+        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+        
+        def find_column(keywords: list[str]):
+            for col in numeric_cols:
+                lowered = col.lower()
+                if any(keyword in lowered for keyword in keywords):
+                    return col
+            return None
+        
+        correlations = {}
+        strongest_correlations = []
+        actionable_correlations = []
+        excluded_correlations = []
+        
+        quantity_col = find_column(["quantity", "qty", "units", "count"])
+        unit_price_col = find_column(["price", "unit_price", "cost", "rate"])
+        total_col = find_column(["total", "amount", "spent", "revenue", "sales"])
+        
+        structural_pairs = set()
+        if quantity_col and total_col:
+            structural_pairs.add(tuple(sorted((quantity_col, total_col))))
+        if unit_price_col and total_col:
+            structural_pairs.add(tuple(sorted((unit_price_col, total_col))))
+        
+        min_abs_correlation_for_actionable = 0.3
+        
+        def is_obvious_pair(col_a: str, col_b: str):
+            pair = tuple(sorted((col_a, col_b)))
+            if pair in structural_pairs:
+                return "structural relationship with total-like field"
+            
+            explicit_tokens = {
+                "id", "quantity", "qty", "unit", "price", "cost", "rate",
+                "total", "amount", "spent", "revenue", "sales",
+            }
+            lower_tokens_a = set(col_a.lower().replace("-", " ").replace("_", " ").split())
+            lower_tokens_b = set(col_b.lower().replace("-", " ").replace("_", " ").split())
+            overlap = lower_tokens_a & lower_tokens_b
+            if overlap & explicit_tokens:
+                return "column names indicate overlapping/derived business metric semantics"
+            return None
+        
+        if len(numeric_cols) >= 2:
+            corr_matrix = df[numeric_cols].corr().round(4)
+            correlations = corr_matrix.to_dict()
+            
+            all_pairs = []
+            for i, col_a in enumerate(corr_matrix.columns):
+                for j, col_b in enumerate(corr_matrix.columns):
+                    if j <= i:
+                        continue
+                    corr_value = corr_matrix.iloc[i, j]
+                    if pd.isna(corr_value):
+                        continue
+                    all_pairs.append({
+                        "column_a": col_a,
+                        "column_b": col_b,
+                        "correlation": round(float(corr_value), 4),
+                        "abs_correlation": round(abs(float(corr_value)), 4),
+                    })
+            all_pairs = sorted(
+                all_pairs,
+                key=lambda x: x["abs_correlation"],
+                reverse=True,
+            )
+            strongest_correlations = all_pairs[:5]
+            
+            for pair in all_pairs:
+                obvious_reason = is_obvious_pair(pair["column_a"], pair["column_b"])
+                if obvious_reason:
+                    excluded_correlations.append({
+                        **pair,
+                        "reason": obvious_reason,
+                    })
+                    continue
+                
+                if pair["abs_correlation"] < min_abs_correlation_for_actionable:
+                    excluded_correlations.append({
+                        **pair,
+                        "reason": (
+                            f"below minimum abs(correlation) threshold "
+                            f"({min_abs_correlation_for_actionable}) for actionable signal"
+                        ),
+                    })
+                    continue
+                
+                actionable_correlations.append(pair)
+                if len(actionable_correlations) >= 5:
+                    break
+        
+        duplicate_rows = int(df.duplicated().sum())
+        duplicate_pct = round((duplicate_rows / len(df) * 100), 2) if len(df) > 0 else 0.0
+        
+        high_cardinality_columns = {}
+        for col in categorical_cols:
+            non_null = df[col].dropna()
+            if non_null.empty:
+                continue
+            unique_ratio = non_null.nunique() / len(non_null)
+            if unique_ratio > 0.9:
+                high_cardinality_columns[col] = {
+                    "unique_count": int(non_null.nunique()),
+                    "non_null_count": int(len(non_null)),
+                    "unique_ratio": round(float(unique_ratio), 4),
+                }
+        
+        suspicious_tokens = {
+            "unknown", "error", "n/a", "na", "none", "null", "missing", "other", "-"
+        }
+        suspicious_values = {}
+        for col in categorical_cols:
+            non_null = df[col].dropna().astype(str).str.strip()
+            if non_null.empty:
+                continue
+            normalized = non_null.str.lower()
+            flagged = normalized.isin(suspicious_tokens)
+            if flagged.any():
+                suspicious_counts = non_null[flagged].value_counts().to_dict()
+                suspicious_values[col] = {
+                    "count": int(flagged.sum()),
+                    "percentage": round(float(flagged.sum() / len(non_null) * 100), 2),
+                    "value_counts": {str(k): int(v) for k, v in suspicious_counts.items()},
+                }
+        
+        formula_check = {
+            "status": "not_applicable",
+            "reason": "No compatible quantity, unit price, and total numeric columns found.",
+        }
+        if quantity_col and unit_price_col and total_col:
+            subset_cols = [quantity_col, unit_price_col, total_col]
+            id_col = next((col for col in df.columns if "id" in col.lower()), None)
+            if id_col:
+                subset_cols = [id_col] + subset_cols
+            check_df = df[subset_cols].dropna(subset=[quantity_col, unit_price_col, total_col])
+            if len(check_df) > 0:
+                expected_total = check_df[quantity_col] * check_df[unit_price_col]
+                absolute_error = (expected_total - check_df[total_col]).abs()
+                mismatch_mask = absolute_error > 0.01
+                mismatch_rows = check_df[mismatch_mask]
+                formula_check = {
+                    "status": "evaluated",
+                    "quantity_column": quantity_col,
+                    "unit_price_column": unit_price_col,
+                    "total_column": total_col,
+                    "rows_evaluated": int(len(check_df)),
+                    "mismatch_count": int(mismatch_mask.sum()),
+                    "mismatch_percentage": round(float(mismatch_mask.mean() * 100), 2),
+                    "mean_absolute_error": round(float(absolute_error.mean()), 4),
+                    "max_absolute_error": round(float(absolute_error.max()), 4),
+                    "sample_mismatches": mismatch_rows.head(5).to_dict(orient="records"),
+                }
+        
+        results["analyze_relationships"] = {
+            "numeric_correlations": correlations,
+            "strongest_correlations": strongest_correlations,
+            "actionable_correlations": actionable_correlations,
+            "excluded_correlations": excluded_correlations[:10],
+            "duplicate_rows": {
+                "count": duplicate_rows,
+                "percentage": duplicate_pct,
+            },
+            "high_cardinality_columns": high_cardinality_columns,
+            "suspicious_categorical_values": suspicious_values,
+            "formula_check": formula_check,
+        }
+        
+        return {
+            "current_step": "analyze_relationships",
+            "results": results,
+        }
     
     def extract_observations_node(state: EDAState):
         """Extract observations from the latest analysis results using LLM."""
