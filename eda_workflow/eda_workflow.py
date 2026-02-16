@@ -226,9 +226,15 @@ def make_eda_baseline_workflow(
         df = pd.DataFrame.from_dict(state.get("dataframe"))
         results = state.get("results", {})
         
+        # Split columns into broad analytical roles:
+        # numeric fields for metric aggregation and categorical-like fields for segmentation.
+        # This keeps the node generic across datasets with different schemas.
         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
         categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
         
+        # Build a compact numeric summary per column.
+        # We include central tendency + spread + range so downstream LLM prompts
+        # can reason about scale and volatility without recomputing statistics.
         overall_numeric = {}
         for col in numeric_cols:
             series = df[col].dropna()
@@ -244,6 +250,9 @@ def make_eda_baseline_workflow(
             }
         
         grouped_aggregates = {}
+        # Guardrail: only group by moderate-cardinality columns.
+        # Very high-cardinality columns (for example IDs) create noisy, low-value summaries.
+        # The threshold scales with data size but is capped to keep output bounded.
         max_unique_for_groupby = min(25, max(2, int(len(df) * 0.1))) if len(df) > 0 else 2
         candidate_group_cols = []
         for col in categorical_cols:
@@ -251,6 +260,8 @@ def make_eda_baseline_workflow(
             if 2 <= unique_count <= max_unique_for_groupby:
                 candidate_group_cols.append(col)
         
+        # Keep only a small number of dimensions and rows so results stay interpretable
+        # and token-efficient for the observation extraction step.
         for col in candidate_group_cols[:3]:
             grouped = df.groupby(col, dropna=False).size().to_frame("row_count")
             for metric_col in numeric_cols[:3]:
@@ -267,6 +278,10 @@ def make_eda_baseline_workflow(
         
         temporal_aggregates = {}
         parsed_dates = {}
+        # Detect date-like columns conservatively:
+        # 1) use native datetime columns directly
+        # 2) for object/string columns, only attempt parse when column name looks temporal.
+        # This avoids accidental parsing work and warnings on arbitrary text fields.
         for col in df.columns:
             if pd.api.types.is_datetime64_any_dtype(df[col]):
                 parsed = pd.to_datetime(df[col], errors="coerce")
@@ -284,12 +299,15 @@ def make_eda_baseline_workflow(
                 parsed_dates[col] = parsed
         
         if parsed_dates:
+            # If multiple date candidates exist, choose the one with best parse coverage.
             date_col = max(parsed_dates, key=lambda c: parsed_dates[c].notna().mean())
             date_series = parsed_dates[date_col]
             date_df = df.copy()
             date_df["_date"] = date_series
             date_df = date_df.dropna(subset=["_date"])
             
+            # Prefer a business-value metric for temporal rollups (for example revenue/total).
+            # Fallback to the first numeric column so the node still returns useful time trends.
             preferred_metric = None
             preferred_keywords = ["total", "amount", "revenue", "sales", "spent"]
             for keyword in preferred_keywords:
@@ -302,6 +320,8 @@ def make_eda_baseline_workflow(
             if preferred_metric is None and numeric_cols:
                 preferred_metric = numeric_cols[0]
             
+            # Provide two complementary temporal views:
+            # monthly for broad trend and day-of-week for intra-week pattern signals.
             monthly_period = date_df["_date"].dt.to_period("M").astype(str)
             monthly = date_df.groupby(monthly_period).size().to_frame("row_count")
             day_of_week = date_df.groupby(date_df["_date"].dt.day_name()).size().to_frame("row_count")
@@ -317,6 +337,7 @@ def make_eda_baseline_workflow(
                     date_df.groupby(date_df["_date"].dt.day_name())[preferred_metric].sum()
                 )
             
+            # Reindex weekdays to calendar order instead of alphabetical order for readability.
             day_order = [
                 "Monday", "Tuesday", "Wednesday", "Thursday",
                 "Friday", "Saturday", "Sunday",
@@ -357,9 +378,13 @@ def make_eda_baseline_workflow(
         df = pd.DataFrame.from_dict(state.get("dataframe"))
         results = state.get("results", {})
         
+        # Separate numeric fields for correlation analysis from categorical-like fields
+        # used in identity/sentinel quality checks.
         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
         categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
         
+        # Lightweight schema heuristic to detect semantically important fields
+        # without hard-coding exact column names.
         def find_column(keywords: list[str]):
             for col in numeric_cols:
                 lowered = col.lower()
@@ -369,19 +394,26 @@ def make_eda_baseline_workflow(
         
         correlations = {}
         strongest_correlations = []
+        # strongest_correlations is a raw ranking for transparency.
+        # actionable_correlations is the curated subset intended for reporting.
         actionable_correlations = []
+        # excluded_correlations documents why high-correlation pairs were filtered out.
         excluded_correlations = []
         
         quantity_col = find_column(["quantity", "qty", "units", "count"])
         unit_price_col = find_column(["price", "unit_price", "cost", "rate"])
         total_col = find_column(["total", "amount", "spent", "revenue", "sales"])
         
+        # Structural pairs are typically formula-driven and obvious in commerce datasets.
+        # We keep them for auditability but avoid surfacing them as "insights".
         structural_pairs = set()
         if quantity_col and total_col:
             structural_pairs.add(tuple(sorted((quantity_col, total_col))))
         if unit_price_col and total_col:
             structural_pairs.add(tuple(sorted((unit_price_col, total_col))))
         
+        # Minimum signal strength for relationships to be treated as actionable.
+        # This avoids cluttering output with weak correlations.
         min_abs_correlation_for_actionable = 0.3
         
         def is_obvious_pair(col_a: str, col_b: str):
@@ -389,6 +421,8 @@ def make_eda_baseline_workflow(
             if pair in structural_pairs:
                 return "structural relationship with total-like field"
             
+            # Additional heuristic: if both column names share explicit metric tokens,
+            # treat the pair as likely derived/overlapping semantics.
             explicit_tokens = {
                 "id", "quantity", "qty", "unit", "price", "cost", "rate",
                 "total", "amount", "spent", "revenue", "sales",
@@ -404,6 +438,9 @@ def make_eda_baseline_workflow(
             corr_matrix = df[numeric_cols].corr().round(4)
             correlations = corr_matrix.to_dict()
             
+            # Enumerate all unique numeric pairs once, then rank by abs(correlation).
+            # We keep both signed and absolute values so consumers can use directionality
+            # while ranking by strength.
             all_pairs = []
             for i, col_a in enumerate(corr_matrix.columns):
                 for j, col_b in enumerate(corr_matrix.columns):
@@ -425,6 +462,8 @@ def make_eda_baseline_workflow(
             )
             strongest_correlations = all_pairs[:5]
             
+            # Curate a non-trivial relationship set:
+            # exclude obvious/derived pairs first, then exclude weak signals.
             for pair in all_pairs:
                 obvious_reason = is_obvious_pair(pair["column_a"], pair["column_b"])
                 if obvious_reason:
@@ -448,10 +487,13 @@ def make_eda_baseline_workflow(
                 if len(actionable_correlations) >= 5:
                     break
         
+        # Duplicate rows are a direct quality-risk indicator for transactional datasets.
         duplicate_rows = int(df.duplicated().sum())
         duplicate_pct = round((duplicate_rows / len(df) * 100), 2) if len(df) > 0 else 0.0
         
         high_cardinality_columns = {}
+        # High-cardinality categoricals are often identifiers and can dominate naive analyses.
+        # We surface them so downstream steps can avoid treating them as segment dimensions.
         for col in categorical_cols:
             non_null = df[col].dropna()
             if non_null.empty:
@@ -468,6 +510,8 @@ def make_eda_baseline_workflow(
             "unknown", "error", "n/a", "na", "none", "null", "missing", "other", "-"
         }
         suspicious_values = {}
+        # Sentinel values are common "hidden missingness" patterns in categorical fields.
+        # This check complements null analysis by catching placeholder strings.
         for col in categorical_cols:
             non_null = df[col].dropna().astype(str).str.strip()
             if non_null.empty:
@@ -486,6 +530,8 @@ def make_eda_baseline_workflow(
             "status": "not_applicable",
             "reason": "No compatible quantity, unit price, and total numeric columns found.",
         }
+        # Where schema permits, validate arithmetic consistency of row-level totals.
+        # This directly checks a high-impact business rule for transactional data quality.
         if quantity_col and unit_price_col and total_col:
             subset_cols = [quantity_col, unit_price_col, total_col]
             id_col = next((col for col in df.columns if "id" in col.lower()), None)
