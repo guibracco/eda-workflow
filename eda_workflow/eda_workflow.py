@@ -371,6 +371,151 @@ def make_eda_baseline_workflow(
             "results": results,
         }
     
+    def analyze_distributions_node(state: EDAState):
+        """Analyze univariate distributions and outlier patterns."""
+        logger.info("Analyzing distributions")
+        df = pd.DataFrame.from_dict(state.get("dataframe"))
+        results = state.get("results", {})
+        
+        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        categorical_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+        
+        numeric_distributions = {}
+        for col in numeric_cols:
+            series = df[col].dropna()
+            if series.empty:
+                continue
+            
+            quantiles = series.quantile([0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99])
+            q1 = float(quantiles.loc[0.25])
+            q3 = float(quantiles.loc[0.75])
+            iqr = q3 - q1
+            
+            if iqr > 0:
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+                outlier_mask = (series < lower_bound) | (series > upper_bound)
+            else:
+                lower_bound = q1
+                upper_bound = q3
+                outlier_mask = pd.Series(False, index=series.index)
+            
+            zero_count = int((series == 0).sum())
+            negative_count = int((series < 0).sum())
+            outlier_count = int(outlier_mask.sum())
+            
+            numeric_distributions[col] = {
+                "count": int(series.size),
+                "missing_count": int(df[col].isna().sum()),
+                "missing_percentage": round(float(df[col].isna().mean() * 100), 2),
+                "mean": round(float(series.mean()), 4),
+                "std": round(float(series.std()), 4) if len(series) > 1 else 0.0,
+                "skewness": round(float(series.skew()), 4) if len(series) > 2 else 0.0,
+                "quantiles": {
+                    "p01": round(float(quantiles.loc[0.01]), 4),
+                    "p05": round(float(quantiles.loc[0.05]), 4),
+                    "p25": round(float(q1), 4),
+                    "p50": round(float(quantiles.loc[0.5]), 4),
+                    "p75": round(float(q3), 4),
+                    "p95": round(float(quantiles.loc[0.95]), 4),
+                    "p99": round(float(quantiles.loc[0.99]), 4),
+                },
+                "iqr": round(float(iqr), 4),
+                "iqr_outlier_bounds": {
+                    "lower": round(float(lower_bound), 4),
+                    "upper": round(float(upper_bound), 4),
+                },
+                "iqr_outlier_count": outlier_count,
+                "iqr_outlier_percentage": round(float(outlier_count / len(series) * 100), 2),
+                "zero_count": zero_count,
+                "zero_percentage": round(float(zero_count / len(series) * 100), 2),
+                "negative_count": negative_count,
+                "negative_percentage": round(float(negative_count / len(series) * 100), 2),
+                "distinct_values": int(series.nunique()),
+            }
+        
+        distribution_flags = {
+            "highest_outlier_rate": [],
+            "most_skewed": [],
+            "zero_inflated": [],
+            "near_constant": [],
+        }
+        if numeric_distributions:
+            outlier_ranked = sorted(
+                [
+                    {
+                        "column": col,
+                        "iqr_outlier_percentage": metrics["iqr_outlier_percentage"],
+                    }
+                    for col, metrics in numeric_distributions.items()
+                ],
+                key=lambda x: x["iqr_outlier_percentage"],
+                reverse=True,
+            )
+            distribution_flags["highest_outlier_rate"] = outlier_ranked[:3]
+            
+            skew_ranked = sorted(
+                [
+                    {
+                        "column": col,
+                        "skewness": metrics["skewness"],
+                        "abs_skewness": round(abs(metrics["skewness"]), 4),
+                    }
+                    for col, metrics in numeric_distributions.items()
+                ],
+                key=lambda x: x["abs_skewness"],
+                reverse=True,
+            )
+            distribution_flags["most_skewed"] = skew_ranked[:3]
+            
+            distribution_flags["zero_inflated"] = [
+                {
+                    "column": col,
+                    "zero_percentage": metrics["zero_percentage"],
+                }
+                for col, metrics in numeric_distributions.items()
+                if metrics["zero_percentage"] >= 30
+            ][:5]
+            
+            distribution_flags["near_constant"] = [
+                {
+                    "column": col,
+                    "distinct_values": metrics["distinct_values"],
+                }
+                for col, metrics in numeric_distributions.items()
+                if metrics["distinct_values"] <= 2
+            ][:5]
+        
+        rare_categories = {}
+        for col in categorical_cols[:5]:
+            non_null = df[col].dropna()
+            if non_null.empty:
+                continue
+            value_share = non_null.value_counts(normalize=True)
+            value_counts = non_null.value_counts()
+            rare_values = value_share[value_share < 0.01]
+            if rare_values.empty:
+                continue
+            rare_categories[col] = [
+                {
+                    "value": str(value),
+                    "count": int(value_counts.loc[value]),
+                    "percentage": round(float(share * 100), 2),
+                }
+                for value, share in rare_values.head(10).items()
+            ]
+        
+        results["analyze_distributions"] = {
+            "numeric_distributions": numeric_distributions,
+            "distribution_flags": distribution_flags,
+            "rare_categories": rare_categories,
+        }
+        
+        return {
+            "current_step": "analyze_distributions",
+            "results": results,
+        }
+    
     def analyze_relationships_node(state: EDAState):
         """Analyze relationships between variables.
         """
@@ -653,8 +798,10 @@ def make_eda_baseline_workflow(
     workflow.add_node("extract_observations_2", extract_observations_node)
     workflow.add_node("compute_aggregates", compute_aggregates_node)
     workflow.add_node("extract_observations_3", extract_observations_node)
-    workflow.add_node("analyze_relationships", analyze_relationships_node)
+    workflow.add_node("analyze_distributions", analyze_distributions_node)
     workflow.add_node("extract_observations_4", extract_observations_node)
+    workflow.add_node("analyze_relationships", analyze_relationships_node)
+    workflow.add_node("extract_observations_5", extract_observations_node)
     workflow.add_node("synthesize_findings", synthesize_findings_node)
     
     workflow.set_entry_point("profile_dataset")
@@ -664,9 +811,11 @@ def make_eda_baseline_workflow(
     workflow.add_edge("analyze_missingness", "extract_observations_2")
     workflow.add_edge("extract_observations_2", "compute_aggregates")
     workflow.add_edge("compute_aggregates", "extract_observations_3")
-    workflow.add_edge("extract_observations_3", "analyze_relationships")
-    workflow.add_edge("analyze_relationships", "extract_observations_4")
-    workflow.add_edge("extract_observations_4", "synthesize_findings")
+    workflow.add_edge("extract_observations_3", "analyze_distributions")
+    workflow.add_edge("analyze_distributions", "extract_observations_4")
+    workflow.add_edge("extract_observations_4", "analyze_relationships")
+    workflow.add_edge("analyze_relationships", "extract_observations_5")
+    workflow.add_edge("extract_observations_5", "synthesize_findings")
     workflow.add_edge("synthesize_findings", END)
     
     app = workflow.compile(checkpointer=checkpointer, name=WORKFLOW_NAME)
