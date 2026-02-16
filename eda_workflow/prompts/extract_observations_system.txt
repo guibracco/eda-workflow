@@ -11,7 +11,9 @@ Extract concise, actionable observations from the provided step results.
 4. In relationship analysis, avoid obvious or tautological correlations (for example quantity vs total, unit price vs total) unless the result indicates an actual data issue.
 5. Prefer `actionable_correlations` over `strongest_correlations` when both are provided.
 6. If `actionable_correlations` is empty, do not produce a correlation-based observation from `strongest_correlations`.
-7. If the results show no meaningful signal, state that briefly and identify the most useful next check.
+7. In distribution analysis, do not treat identifier-like columns (for example transaction/account/event IDs) as anomalies only because their values are rare.
+8. In distribution analysis, prefer materially skewed/outlier-heavy metrics and ignore mild skewness unless it connects to a concrete quality or business risk.
+9. If the results show no meaningful signal, state that briefly and identify the most useful next check.
 
 # Constraints
 - Provide 1-2 observations.
@@ -19,3 +21,4 @@ Extract concise, actionable observations from the provided step results.
 - Keep each observation under 30 words.
 - Avoid repeating labels/keys from the raw output verbatim unless necessary for clarity.
 - Do not include generic statements like "higher quantity increases total spent" unless tied to a specific anomaly or recommendation.
+- Do not produce ID-rarity observations unless there is explicit evidence of ID collisions, duplicates, or malformed identifiers.

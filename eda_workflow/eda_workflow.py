@@ -456,6 +456,12 @@ def make_eda_baseline_workflow(
             "zero_inflated": [],
             "near_constant": [],
         }
+        # These thresholds intentionally suppress low-signal distribution remarks.
+        # Without them, the LLM tends to comment on mild skew/outlier levels that are
+        # statistically true but operationally unimportant in first-pass EDA.
+        # Keeping only material signals improves observation quality.
+        min_actionable_outlier_pct = 1.0
+        min_actionable_abs_skewness = 1.0
         if numeric_distributions:
             # Top outlier-rate columns often identify winsorization/capping candidates.
             outlier_ranked = sorted(
@@ -465,6 +471,7 @@ def make_eda_baseline_workflow(
                         "iqr_outlier_percentage": metrics["iqr_outlier_percentage"],
                     }
                     for col, metrics in numeric_distributions.items()
+                    if metrics["iqr_outlier_percentage"] >= min_actionable_outlier_pct
                 ],
                 key=lambda x: x["iqr_outlier_percentage"],
                 reverse=True,
@@ -480,6 +487,7 @@ def make_eda_baseline_workflow(
                         "abs_skewness": round(abs(metrics["skewness"]), 4),
                     }
                     for col, metrics in numeric_distributions.items()
+                    if abs(metrics["skewness"]) >= min_actionable_abs_skewness
                 ],
                 key=lambda x: x["abs_skewness"],
                 reverse=True,
@@ -508,15 +516,62 @@ def make_eda_baseline_workflow(
             ][:5]
         
         rare_categories = {}
-        # Rare-level scan is capped (first 5 categorical columns, top 10 rare values)
-        # to keep output compact and token-efficient while still surfacing category
-        # sparsity that can hurt grouping/model stability.
-        for col in categorical_cols[:5]:
+        # Track columns we skipped and why, so the output remains auditable.
+        # This helps avoid confusion about missing rare-category results.
+        rare_category_exclusions = {}
+        
+        def is_identifier_like_categorical(column_name: str, non_null_series: pd.Series):
+            # Name-based heuristic first: columns explicitly labeled as IDs/keys
+            # should not be treated as business categories for rarity analysis.
+            lowered = column_name.lower()
+            identifier_tokens = {"id", "uuid", "guid", "key", "token", "reference"}
+            name_indicates_identifier = any(token in lowered for token in identifier_tokens)
+
+            # Temporal fields also produce low-value "rare" levels (for example dates),
+            # which usually reflect normal granularity rather than anomalies.
+            temporal_tokens = {"date", "time", "timestamp", "day", "month", "year"}
+            name_indicates_temporal = any(token in lowered for token in temporal_tokens)
+            
+            # Behavior-based fallback: even if the name is generic, near-unique columns
+            # typically act like identifiers and should be excluded from rarity flags.
+            unique_count = int(non_null_series.nunique())
+            unique_ratio = float(unique_count / len(non_null_series))
+            behavior_indicates_identifier = unique_ratio >= 0.9 and unique_count >= 50
+            
+            if name_indicates_identifier:
+                return True, "column name indicates identifier semantics"
+            if name_indicates_temporal:
+                return True, "column appears temporal; rare-category analysis is usually not meaningful"
+            if behavior_indicates_identifier:
+                return True, "high-cardinality behavior indicates identifier-like column"
+            return False, ""
+        
+        # Rare-level scan is capped to 5 non-excluded categorical columns
+        # (plus max 10 rare values per column) to keep output compact and
+        # token-efficient while still surfacing category sparsity that can
+        # hurt grouping/model stability.
+        analyzed_rare_category_columns = 0
+        for col in categorical_cols:
+            # Limit applies to analyzable columns, not raw column position.
+            # This prevents early ID/time columns from consuming the scan budget.
+            if analyzed_rare_category_columns >= 5:
+                break
             non_null = df[col].dropna()
             if non_null.empty:
                 continue
+            
+            is_identifier_like, exclusion_reason = is_identifier_like_categorical(col, non_null)
+            if is_identifier_like:
+                rare_category_exclusions[col] = exclusion_reason
+                continue
+            
+            analyzed_rare_category_columns += 1
+            
             value_share = non_null.value_counts(normalize=True)
             value_counts = non_null.value_counts()
+            # Use <1% as a simple first-pass rarity threshold.
+            # It is strict enough to avoid noise while still surfacing long-tail levels
+            # that can impact grouping robustness or model generalization.
             rare_values = value_share[value_share < 0.01]
             if rare_values.empty:
                 continue
@@ -533,6 +588,9 @@ def make_eda_baseline_workflow(
             "numeric_distributions": numeric_distributions,
             "distribution_flags": distribution_flags,
             "rare_categories": rare_categories,
+            # Exclusions are returned for transparency and easier debugging of
+            # observation-generation behavior.
+            "rare_category_exclusions": rare_category_exclusions,
         }
         
         return {
