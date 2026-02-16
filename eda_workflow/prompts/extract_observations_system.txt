@@ -14,7 +14,7 @@ Extract 1-2 concise, actionable observations from the provided step results.
 7. If the results show no meaningful signal, state that briefly and identify the most useful next check.
 
 # Constraints
-- Return exactly 1-2 observations.
+- Return exactly 1-3 observations.
 - Each observation should be one sentence.
 - Keep each observation under 30 words.
 - Avoid repeating labels/keys from the raw output verbatim unless necessary for clarity.
