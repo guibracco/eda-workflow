@@ -152,7 +152,7 @@ If OpenAI or Mermaid network calls are unavailable, the script falls back to det
 ## Project Structure
 
 ```
-eda-agent/
+eda-workflow/
 ├── data/
 │   ├── cafe_sales.csv             # Sample dataset
 │   ├── factory_iot_telemetry.csv  # Sample dataset
