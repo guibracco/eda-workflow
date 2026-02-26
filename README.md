@@ -39,9 +39,9 @@ The workflow currently runs five deterministic analysis tools:
    - suspicious categorical token detection (e.g., `unknown`, `error`, `missing`)
    - arithmetic consistency checks for quantity x unit price vs total when compatible columns exist
 
-### Why These Additions
+### Why These Tools
 
-These three added tools (`compute_aggregates`, `analyze_distributions`, `analyze_relationships`) were chosen because they cover the highest-value questions in a first-pass EDA with minimal complexity:
+These three last tools (`compute_aggregates`, `analyze_distributions`, `analyze_relationships`) were chosen because they cover the highest-value questions in a first-pass EDA with minimal complexity:
 
 - **Where is volume/value concentrated?** (grouped + temporal aggregates)
 - **Which columns have outliers or heavy skew?** (distribution diagnostics)
