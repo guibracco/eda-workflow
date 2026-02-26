@@ -32,7 +32,7 @@ MANIFEST
 venv/
 
 # Generated files
-graph.png
+# graph.png
 ENV/
 env/
 .venv
